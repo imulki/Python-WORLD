@@ -14,6 +14,48 @@ import numba
 EPS = 2.220446049250313e-16
 
 
+# Harvest, but we take everything
+def total_harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_period: int=5) -> dict:
+    basic_frame_period: int = 1
+    target_fs = 8000
+    num_samples = int(1000 * len(x) / fs / basic_frame_period + 1)
+    basic_temporal_positions = np.arange(0, num_samples) * basic_frame_period / 1000
+    channels_in_octave = 40
+    f0_floor_adjusted = f0_floor * 0.9
+    f0_ceil_adjusted = f0_ceil * 1.1
+
+    boundary_f0_list = np.arange(np.ceil(np.log2(f0_ceil_adjusted / f0_floor_adjusted) * channels_in_octave)) + 1
+    boundary_f0_list = boundary_f0_list / channels_in_octave
+    boundary_f0_list = 2.0 ** boundary_f0_list
+    boundary_f0_list *= f0_floor_adjusted
+
+    # down - sampling to target_fs Hz
+    [y, actual_fs] = CalculateDownsampledSignal(x, fs, target_fs)
+    fft_size = int(2 ** np.ceil(np.log2(len(y) + int(fs / f0_floor_adjusted * 4 + 0.5) + 1)))
+    y_spectrum = np.fft.fft(y, fft_size)
+
+    raw_f0_candidates = CalculateCandidates(len(basic_temporal_positions), boundary_f0_list, len(y),
+                                            basic_temporal_positions, actual_fs, y_spectrum, f0_floor, f0_ceil)
+    f0_candidates, number_of_candidates = DetectCandidates(raw_f0_candidates)
+    f0_candidates = OverlapF0Candidates(f0_candidates, number_of_candidates)
+    f0_candidates, f0_candidates_score = RefineCandidates(y, actual_fs,
+                                                          basic_temporal_positions, f0_candidates, f0_floor, f0_ceil)
+    # f0_candidates, f0_candidates_score = RemoveUnreliableCandidates(f0_candidates, f0_candidates_score)
+
+    connected_f0, vuv = FixF0Contour(f0_candidates, f0_candidates_score)
+    smoothed_f0 = SmoothF0(connected_f0)
+    num_samples = int(1000 * len(x) / fs / frame_period + 1)
+    temporal_positions = np.arange(0, num_samples) * frame_period / 1000
+    temporal_positions_sampe = np.minimum(len(smoothed_f0) - 1, round_matlab(temporal_positions * 1000))
+    temporal_positions_sampe = np.array(temporal_positions_sampe, dtype=np.int32)
+    return {
+        'temporal_positions': temporal_positions,
+        'f0': smoothed_f0[temporal_positions_sampe],
+        'vuv': vuv[temporal_positions_sampe]
+    }
+
+
+############################################################################################
 def harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_period: int=5) -> dict:
     basic_frame_period: int = 1
     target_fs = 8000
@@ -46,7 +88,7 @@ def harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_pe
     num_samples = int(1000 * len(x) / fs / frame_period + 1)
     temporal_positions = np.arange(0, num_samples) * frame_period / 1000
     temporal_positions_sampe = np.minimum(len(smoothed_f0) - 1, round_matlab(temporal_positions * 1000))
-    temporal_positions_sampe = np.array(temporal_positions_sampe, dtype=np.int)
+    temporal_positions_sampe = np.array(temporal_positions_sampe, dtype=np.int32)
     return {
         'temporal_positions': temporal_positions,
         'f0': smoothed_f0[temporal_positions_sampe],
@@ -186,7 +228,7 @@ def GetRefinedF0(x: np.ndarray, fs: float, current_time: float, current_f0: floa
     diff = np.diff(main_window)
     diff_window[1:-1] = - (diff[1:] + diff[:-1]) / 2
 
-    index = (np.maximum(1, np.minimum(len(x), index_raw)) - 1).astype(np.int)
+    index = (np.maximum(1, np.minimum(len(x), index_raw)) - 1).astype(np.int32)
 
     spectrum = fft(x[index] * main_window, fft_size)
     diff_spectrum = fft(x[index] * diff_window, fft_size)
@@ -198,7 +240,7 @@ def GetRefinedF0(x: np.ndarray, fs: float, current_time: float, current_f0: floa
     number_of_harmonics = min(np.floor(fs / 2 / current_f0), 6)  # with safe guard
     harmonic_index = np.arange(1, number_of_harmonics + 1)
 
-    index = round_matlab(current_f0 * fft_size / fs * harmonic_index).astype(np.int)
+    index = round_matlab(current_f0 * fft_size / fs * harmonic_index).astype(np.int32)
     instantaneous_frequency_list = instantaneous_frequency[index]
     amplitude_list = np.sqrt(power_spectrum[index])
     refined_f0 = np.sum(amplitude_list * instantaneous_frequency_list) / np.sum(amplitude_list * harmonic_index)
