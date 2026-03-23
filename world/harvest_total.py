@@ -13,99 +13,6 @@ import numba
 
 EPS = 2.220446049250313e-16
 
-def hv_cand_num(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_period: int=5) -> int:
-    basic_frame_period: int = 1
-    target_fs = 8000
-    num_samples = int(1000 * len(x) / fs / basic_frame_period + 1)
-    basic_temporal_positions = np.arange(0, num_samples) * basic_frame_period / 1000
-    channels_in_octave = 40
-    f0_floor_adjusted = f0_floor * 0.9
-    f0_ceil_adjusted = f0_ceil * 1.1
-
-    boundary_f0_list = np.arange(np.ceil(np.log2(f0_ceil_adjusted / f0_floor_adjusted) * channels_in_octave)) + 1
-    boundary_f0_list = boundary_f0_list / channels_in_octave
-    boundary_f0_list = 2.0 ** boundary_f0_list
-    boundary_f0_list *= f0_floor_adjusted
-
-    # down - sampling to target_fs Hz
-    [y, actual_fs] = CalculateDownsampledSignal(x, fs, target_fs)
-    fft_size = int(2 ** np.ceil(np.log2(len(y) + int(fs / f0_floor_adjusted * 4 + 0.5) + 1)))
-    y_spectrum = np.fft.fft(y, fft_size)
-
-    # Calculate from 4 points
-    raw_f0_candidates = CalculateCandidates(len(basic_temporal_positions), boundary_f0_list, len(y),
-                                            basic_temporal_positions, actual_fs, y_spectrum, f0_floor, f0_ceil)
-    # 
-    f0_candidates, number_of_candidates = DetectCandidates(raw_f0_candidates)
-
-    return number_of_candidates
-
-
-############################################################################################
-def sawed_harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_period: int=5) -> dict:
-    basic_frame_period: int = 1
-    target_fs = 8000
-    num_samples = int(1000 * len(x) / fs / basic_frame_period + 1)
-    basic_temporal_positions = np.arange(0, num_samples) * basic_frame_period / 1000
-    channels_in_octave = 40
-    f0_floor_adjusted = f0_floor * 0.9
-    f0_ceil_adjusted = f0_ceil * 1.1
-
-    boundary_f0_list = np.arange(np.ceil(np.log2(f0_ceil_adjusted / f0_floor_adjusted) * channels_in_octave)) + 1
-    boundary_f0_list = boundary_f0_list / channels_in_octave
-    boundary_f0_list = 2.0 ** boundary_f0_list
-    boundary_f0_list *= f0_floor_adjusted
-
-    # down - sampling to target_fs Hz
-    [y, actual_fs] = CalculateDownsampledSignal(x, fs, target_fs)
-    fft_size = int(2 ** np.ceil(np.log2(len(y) + int(fs / f0_floor_adjusted * 4 + 0.5) + 1)))
-    y_spectrum = np.fft.fft(y, fft_size)
-
-    # Calculate from 4 points
-    raw_f0_candidates = CalculateCandidates(len(basic_temporal_positions), boundary_f0_list, len(y),
-                                            basic_temporal_positions, actual_fs, y_spectrum, f0_floor, f0_ceil)
-    # 
-    f0_candidates, number_of_candidates = DetectCandidates(raw_f0_candidates)
-    f0_candidates = OverlapF0Candidates(f0_candidates, number_of_candidates)
-    f0_candidates, f0_candidates_score = RefineCandidates(y, actual_fs,
-                                                          basic_temporal_positions, f0_candidates, f0_floor, f0_ceil)
-    # f0_candidates, f0_candidates_score = RemoveUnreliableCandidates(f0_candidates, f0_candidates_score)
-
-    return f0_candidates, f0_candidates_score
-
-
-############################################################################################
-def long_rough_harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_period: int=5) -> dict:
-    basic_frame_period: int = 1
-    target_fs = 8000
-    num_samples = int(1000 * len(x) / fs / basic_frame_period + 1)
-    basic_temporal_positions = np.arange(0, num_samples) * basic_frame_period / 1000
-    channels_in_octave = 40
-    f0_floor_adjusted = f0_floor * 0.9
-    f0_ceil_adjusted = f0_ceil * 1.1
-
-    boundary_f0_list = np.arange(np.ceil(np.log2(f0_ceil_adjusted / f0_floor_adjusted) * channels_in_octave)) + 1
-    boundary_f0_list = boundary_f0_list / channels_in_octave
-    boundary_f0_list = 2.0 ** boundary_f0_list
-    boundary_f0_list *= f0_floor_adjusted
-
-    # down - sampling to target_fs Hz
-    [y, actual_fs] = CalculateDownsampledSignal(x, fs, target_fs)
-    fft_size = int(2 ** np.ceil(np.log2(len(y) + int(fs / f0_floor_adjusted * 4 + 0.5) + 1)))
-    y_spectrum = np.fft.fft(y, fft_size)
-
-    raw_f0_candidates = CalculateCandidates(len(basic_temporal_positions), boundary_f0_list, len(y),
-                                            basic_temporal_positions, actual_fs, y_spectrum, f0_floor, f0_ceil)
-    f0_candidates, number_of_candidates = DetectCandidates(raw_f0_candidates)
-    f0_candidates = OverlapF0Candidates(f0_candidates, number_of_candidates)
-    f0_candidates, f0_candidates_score = RefineCandidates(y, actual_fs,
-                                                          basic_temporal_positions, f0_candidates, f0_floor, f0_ceil)
-    f0_candidates, f0_candidates_score = RemoveUnreliableCandidates(f0_candidates, f0_candidates_score)
-
-    connected_f0, vuv = FixF0Contour(f0_candidates, f0_candidates_score)
-    
-    return connected_f0, vuv
-
 
 ############################################################################################
 def harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_period: int=5) -> dict:
@@ -135,8 +42,15 @@ def harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_pe
                                                           basic_temporal_positions, f0_candidates, f0_floor, f0_ceil)
     f0_candidates, f0_candidates_score = RemoveUnreliableCandidates(f0_candidates, f0_candidates_score)
 
-    connected_f0, vuv = FixF0Contour(f0_candidates, f0_candidates_score)
-    smoothed_f0 = SmoothF0(connected_f0)
+    strict_f0, vuv = FixF0Contour(f0_candidates, f0_candidates_score)
+    lenient_f0, _ = FixF0Contour(f0_candidates, f0_candidates_score, 0.5)
+
+    smoothed_strict_f0 = SmoothF0(strict_f0)
+    smoothed_lenient_f0 = SmoothF0(lenient_f0)
+
+    # print(smoothed_lenient_f0.shape, smoothed_strict_f0.shape)
+
+    smoothed_f0 = np.array([s if s>0 else l for s, l in zip(smoothed_strict_f0, smoothed_lenient_f0)])
     num_samples = int(1000 * len(x) / fs / frame_period + 1)
     temporal_positions = np.arange(0, num_samples) * frame_period / 1000
     temporal_positions_sampe = np.minimum(len(smoothed_f0) - 1, round_matlab(temporal_positions * 1000))
@@ -306,29 +220,24 @@ def GetRefinedF0(x: np.ndarray, fs: float, current_time: float, current_f0: floa
 
 
 ####################################################################################################
-# Remove Unreliable Candidates ?
-# There is no such things as this step in the paper
-# It is between GetRefinedF0() and FixContour()
 def RemoveUnreliableCandidates(f0_candidates: np.ndarray, f0_candidates_score: np.ndarray) -> tuple:
-    # Copying input to be used as output
-    # Prevent accidental input value change
     new_f0_candidates = np.array(f0_candidates)
     new_f0_candidates_score = np.array(f0_candidates_score)
     threshold = 0.05
 
-    f0_length = f0_candidates.shape[1]              # Length of audio
-    number_of_candidates = f0_candidates.shape[0]   # Numbe of candidate for each timeframe
+    f0_length = f0_candidates.shape[1]
+    number_of_candidates = f0_candidates.shape[0]
 
-    for i in np.arange(1, f0_length - 1):               # Looping thru all audio with head and tail as exception.
-        for j in np.arange(0, number_of_candidates):    # Looping thru all F0 candidate.
-            reference_f0 = f0_candidates[j, i]          # Set curr loop F0 candidate as reference
-            if reference_f0 == 0:                       # Ignore if the current F0 cand is 0, and continue the loop
+    for i in np.arange(1, f0_length - 1):
+        for j in np.arange(0, number_of_candidates):
+            reference_f0 = f0_candidates[j, i]
+            if reference_f0 == 0:
                 continue
-            _, min_error1 = SelectBestF0(reference_f0, f0_candidates[:, i + 1], 1)      # SelectBestF0(), by looking at the next timeframe
-            _, min_error2 = SelectBestF0(reference_f0, f0_candidates[:, i - 1], 1)      # SelectBestF0(), by looking at the prev timeframe
-            min_error = min([min_error1, min_error2])   # Find the minimum error between 2 above
-            if min_error > threshold:                   # If the error is exceeding the threshold: Make the 
-                new_f0_candidates[j, i] = 0             
+            _, min_error1 = SelectBestF0(reference_f0, f0_candidates[:, i + 1], 1)
+            _, min_error2 = SelectBestF0(reference_f0, f0_candidates[:, i - 1], 1)
+            min_error = min([min_error1, min_error2])
+            if min_error > threshold:
+                new_f0_candidates[j, i] = 0
                 new_f0_candidates_score[j, i] = 0
     return new_f0_candidates, new_f0_candidates_score
 
@@ -336,10 +245,10 @@ def RemoveUnreliableCandidates(f0_candidates: np.ndarray, f0_candidates_score: n
 ###################################################################################################
 @numba.jit((numba.float64, numba.float64[:], numba.float64), nopython=True, cache=True)  # eager compilation through function signature
 def SelectBestF0(reference_f0: float, f0_candidates: np.ndarray, allowed_range: float) -> tuple:
-    best_f0 = 0                                                         # Initiate var
-    best_error = allowed_range                                          # Initiate var
-    for i in np.arange(len(f0_candidates)):                             # Loop thru all F0 candidate
-        tmp = np.abs(reference_f0 - f0_candidates[i]) / reference_f0    # 
+    best_f0 = 0
+    best_error = allowed_range
+    for i in np.arange(len(f0_candidates)):
+        tmp = np.abs(reference_f0 - f0_candidates[i]) / reference_f0
         if tmp > best_error:
             continue
         best_f0 = f0_candidates[i]
@@ -397,9 +306,9 @@ def ZeroCrossingEngine(x: np.ndarray, fs: int) -> tuple:
 
 
 ####################################################################################################
-def FixF0Contour(f0_candidates: np.ndarray, f0_candidates_score: np.ndarray) -> tuple:
+def FixF0Contour(f0_candidates: np.ndarray, f0_candidates_score: np.ndarray, tolerance: float = 0.008) -> tuple:
     f0_base = SearchF0Base(f0_candidates, f0_candidates_score)
-    f0_step1 = FixStep1(f0_base, 0.008) # optimized
+    f0_step1 = FixStep1(f0_base, tolerance) # optimized
     f0_step2 = FixStep2(f0_step1, 6) # optimized
     f0_step3 = FixStep3(f0_step2, f0_candidates, 0.18, f0_candidates_score) # optimized
     f0 = FixStep4(f0_step3, 9) # optimized
