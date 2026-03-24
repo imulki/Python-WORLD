@@ -109,28 +109,53 @@ def long_rough_harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=80
 
 ############################################################################################
 def harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_period: int=5) -> dict:
+    # Basic frame period: it is 1 (ms) not 1(s)
     basic_frame_period: int = 1
+    # They will resample it into 8 Hz
     target_fs = 8000
+    # num_sample? number of sample / timeframe
+    # 1st = len of x / sampling rate    : length of audio (in second)
+    # 2nd = basic_frame_period / 1000   : basic_frame_period (in second/frame, not ms/frame)
+    # 3rd = 1st / 2nd                   : number of frame or sample per audio
     num_samples = int(1000 * len(x) / fs / basic_frame_period + 1)
+    # basic_temporal_position
+    # temporal position for each timeframe, in second
     basic_temporal_positions = np.arange(0, num_samples) * basic_frame_period / 1000
     channels_in_octave = 40
     f0_floor_adjusted = f0_floor * 0.9
     f0_ceil_adjusted = f0_ceil * 1.1
 
+    # Boundary F0 list? What is that?
+    # From the steps, it seem that it tried to have a ascending list of F0 candidate that scales exponentially.
+    # First step, get the amount of F0 list by getting the difference between the ceil and floor range of F0.
     boundary_f0_list = np.arange(np.ceil(np.log2(f0_ceil_adjusted / f0_floor_adjusted) * channels_in_octave)) + 1
+    # 2nd step: Normalization? Making sure the end is the ceiling?
     boundary_f0_list = boundary_f0_list / channels_in_octave
+    # 3rd step: rescaling it exponentially (coz earlier we applied log2())
     boundary_f0_list = 2.0 ** boundary_f0_list
+    # 4th step: making sure list start with floor
     boundary_f0_list *= f0_floor_adjusted
 
     # down - sampling to target_fs Hz
     [y, actual_fs] = CalculateDownsampledSignal(x, fs, target_fs)
+    # Get propoer FFT_size
     fft_size = int(2 ** np.ceil(np.log2(len(y) + int(fs / f0_floor_adjusted * 4 + 0.5) + 1)))
+    # get the spectrogram
     y_spectrum = np.fft.fft(y, fft_size)
 
+    # Calculate candidates. 
+    # For each temp_pos, each boundary_f0 are tested if the F0 cand received based on it still in the boundary of logic.
+    # Return shape: (boundary_f0_len, temp_pos_len)
     raw_f0_candidates = CalculateCandidates(len(basic_temporal_positions), boundary_f0_list, len(y),
                                             basic_temporal_positions, actual_fs, y_spectrum, f0_floor, f0_ceil)
+    # Detect Candidates
+    # It is like a concensus: on a cluster of boundary_f0, averaging is done to get a new F0_cand.
+    # output shape: (n_f0_cand, n_timeframe), max(n_f0_cand)
     f0_candidates, number_of_candidates = DetectCandidates(raw_f0_candidates)
+    # Overlap F0 Candidates
+    # I think the name implies itself
     f0_candidates = OverlapF0Candidates(f0_candidates, number_of_candidates)
+    # Refine Candidates
     f0_candidates, f0_candidates_score = RefineCandidates(y, actual_fs,
                                                           basic_temporal_positions, f0_candidates, f0_floor, f0_ceil)
     f0_candidates, f0_candidates_score = RemoveUnreliableCandidates(f0_candidates, f0_candidates_score)
@@ -150,9 +175,10 @@ def harvest(x: np.ndarray, fs: int, f0_floor: int=71, f0_ceil: int=800, frame_pe
 
 ############################################################################################
 def CalculateDownsampledSignal(x: np.ndarray, fs: int, target_fs: int) -> tuple:
-    decimation_ratio = int(fs / target_fs + 0.5)
+    # Ratio between the orig_fs and target_fs
+    decimation_ratio = int(fs / target_fs + 0.5) 
 
-    if fs <= target_fs:
+    if fs <= target_fs: # Ignore upsampling
         y = copy.deepcopy(x)
         actual_fs = fs
     else:
@@ -169,9 +195,13 @@ def CalculateDownsampledSignal(x: np.ndarray, fs: int, target_fs: int) -> tuple:
 def CalculateCandidates(number_of_frames: int,
                         boundary_f0_list: np.ndarray, y_length: int, temporal_positions: np.ndarray, actual_fs: int, y_spectrum: np.ndarray,
                         f0_floor: int, f0_ceil: int) -> np.ndarray:
+    # Prepare the output
+    # Shape: number of f0 to be tested, number of timeframes
     raw_f0_candidates = np.zeros((len(boundary_f0_list), number_of_frames))
 
+    # Looping thru boundary F0 list (list of num from f0floor --> f0ceil)
     for i in range(len(boundary_f0_list)):
+        # Calculate raw event
         raw_f0_candidates[i, :] = \
                 CalculateRawEvent(boundary_f0_list[i], actual_fs, y_spectrum,
                               y_length, temporal_positions, f0_floor, f0_ceil)
@@ -180,24 +210,43 @@ def CalculateCandidates(number_of_frames: int,
 
 ####################################################################################################
 def DetectCandidates(raw_f0_candidates: np.ndarray):
+    # Get n_boundary_f0 and n_timeframe
     number_of_channels, number_of_frames = raw_f0_candidates.shape
+    # Prepare var for F0_candidates for each number of frames
+    # shape: (round(n_boundary_f0/10), n_timeframe)
     f0_candidates = np.zeros((int(number_of_channels / 10 + 0.5), number_of_frames))
+    # Counter of candidates
     number_of_candidates = 0
+    # THreshold?
     threshold = 10
 
+    # For each timeframe:
     for i in np.arange(number_of_frames):
+        # Get all raw_f0_cands on timeframe i
         tmp = np.array(raw_f0_candidates[:, i])
+        # Making a mask: 1 for candidate, 0 for nothing.
         tmp[tmp > 0] = 1
         tmp[0] = 0
         tmp[-1] = 0
+        # Get the transition point: when v-->uv and vice versa.
         tmp = np.diff(tmp)
+        # Indices where uv --> v
         st = np.where(tmp == 1)[0]
+        # Indices where v --> uv
         ed = np.where(tmp == -1)[0]
+        # Counter for something
         count = 0
+        # looping thru uv>v transition
         for j in np.arange(len(st)):
+            # Checking the distance between j-th v>uv and uv>v (in index)
             dif = ed[j] - st[j]
+            # If the distance exceed threshold
             if dif >= threshold:
+                # Get all the candidates between st[j] and ed[j]
                 tmp_f0 = raw_f0_candidates[st[j] + 1: ed[j] + 1, i]
+                # Calculate their mean, and use it as a F0 candidate.
+                # What if the F0 cand between st[j] and ed[j] are too far?
+                # It cannot be the case, because on a surrounding boundary_f0, the f0_cand must have a similar value.
                 f0_candidates[count, i] = np.mean(tmp_f0)
                 count += 1
         number_of_candidates = max(number_of_candidates, count)
@@ -209,11 +258,15 @@ def OverlapF0Candidates(f0_candidates: np.ndarray, max_candidates: int) -> np.nd
     n = 3 # This is the optimzied parameter.
 
     number_of_candidates = n * 2 + 1
+    # Prepare var for new_f0_cand
     new_f0_candidates = np.zeros((number_of_candidates * max_candidates, f0_candidates.shape[1]))
+    # Assign the first candidate as the number_of_candidates-1-th of the f0_cand
     new_f0_candidates[0, :] = f0_candidates[number_of_candidates - 1, :]
+    # Loop thru number_of_cands
     for i in np.arange(number_of_candidates):
         st1 = max(-(i - n) + 1, 1)
         ed1 = min(-(i - n), 0)
+        # Assign the f0_cand from surrounding timeframe as the f0_cand in the current timeframe
         new_f0_candidates[np.arange(max_candidates) + i * max_candidates, st1 - 1 : new_f0_candidates.shape[1] + ed1] = \
             f0_candidates[np.arange(max_candidates), -ed1 : new_f0_candidates.shape[1] - (st1 - 1)]
     return new_f0_candidates
@@ -224,14 +277,26 @@ import multiprocessing as mp
 
 def RefineCandidates(x: np.ndarray, fs: float, temporal_positions: np.ndarray,
                      f0_candidates: np.ndarray, f0_floor: float, f0_ceil: float) -> tuple:
+    # Prepare var
     new_f0_candidates = copy.deepcopy(f0_candidates)
     f0_candidates_score = f0_candidates * 0
+    # Get the n_candidates, n_timeframe
     N, f = f0_candidates.shape
     if 1:  # parallel
+        # Prepare the data for parallel computing
+        # data:
+        ## x = audio
+        ## fs = sampling rate
+        ## temporal_position[i]
+        ## f0_candidates[j,i]
+        ## f0floor
+        ## f0ceil
         frame_candidate_data = [(x, fs, temporal_positions[i], f0_candidates[j, i], f0_floor, f0_ceil)
                                 for j in np.arange(N)
                                 for i in np.arange(f)]
+        # Creating Pool object, which can be used in parallel computing
         with mp.Pool(mp.cpu_count()) as pool:
+            # Mapping the array of input from frame_candidate_data with GetRefinedF0()
             results = np.array(pool.starmap(GetRefinedF0, frame_candidate_data))
         new_f0_candidates = np.reshape(results[:, 0], [N, f])
         f0_candidates_score = np.reshape(results[:, 1], [N, f])
@@ -261,14 +326,26 @@ def round_matlab(x: np.ndarray) -> np.ndarray:
 ####################################################################################################
 #@numba.jit((numba.float64[:], numba.float64, numba.float64, numba.float64, numba.float64, numba.float64), nopython=True, cache=True)
 def GetRefinedF0(x: np.ndarray, fs: float, current_time: float, current_f0: float, f0_floor: float, f0_ceil: float) -> tuple:
+    # Cannot refine, if it is unvoiced
     if current_f0 == 0:
         return 0, 0
+    #####
+    # Step #0: prepare needed vars
+    #####
+    # half_window_length (in sample)
     half_window_length = np.ceil(3 * fs / current_f0 / 2)
+    # (in second)
     window_length_in_time = (2 * half_window_length + 1) / fs
+    # range between -hwl and hwl (in second)
     base_time = np.arange(-half_window_length, half_window_length + 1) / fs
     fft_size = int(2 ** np.ceil(np.log2((half_window_length * 2 + 1)) + 1))
 
+    ######
+    # Step #1: Get instantaneous freq
+    ######
+
     # First-aid treatment
+    # Get the index representataion of base_time for specific audio x.
     index_raw = round_matlab((current_time + base_time) * fs + 0.001)
 
     common = math.pi * ((index_raw - 1) / fs - current_time) / window_length_in_time
@@ -288,6 +365,10 @@ def GetRefinedF0(x: np.ndarray, fs: float, current_time: float, current_f0: floa
     numerator_i = spectrum.real * diff_spectrum.imag - spectrum.imag * diff_spectrum.real
     power_spectrum = np.abs(spectrum) ** 2
     instantaneous_frequency = (np.arange(fft_size) / fft_size + numerator_i / power_spectrum / 2 / math.pi) * fs
+
+    #######
+    # Step #2: F0 candidate refinement
+    #######
 
     number_of_harmonics = min(np.floor(fs / 2 / current_f0), 6)  # with safe guard
     harmonic_index = np.arange(1, number_of_harmonics + 1)
@@ -349,26 +430,46 @@ def SelectBestF0(reference_f0: float, f0_candidates: np.ndarray, allowed_range: 
 
 ####################################################################################################
 def CalculateRawEvent(boundary_f0: float, fs: int, y_spectrum: np.ndarray, y_length: int, temporal_positions: np.ndarray, f0_floor: int, f0_ceil: int) -> np.ndarray:
+    #######
+    # First stage: Band-pass filter
+    #######
+    # Get the filter length
     filter_length_half = int(Decimal(fs / boundary_f0 * 2).quantize(0, ROUND_HALF_UP))
+    # Get the nuttall window for transformation
     band_pass_filter_base = nuttall(filter_length_half * 2 + 1)
+    # Get the shifter: cos(w_c . t)
     shifter = np.cos(2 * math.pi * boundary_f0 * np.arange(-filter_length_half, filter_length_half + 1) / fs)
+    # Get the band_pass_filter
     band_pass_filter = band_pass_filter_base * shifter
 
     index_bias = filter_length_half + 1
+    # Transform the filter into spectrogram
     spectrum_low_pass_filter = np.fft.fft(band_pass_filter, len(y_spectrum))
 
+    # Apply filter to y_spectrum
     filtered_signal = np.real(np.fft.ifft(spectrum_low_pass_filter * y_spectrum))
+    # Take the filtered signal only at a specific sectors.
     filtered_signal = filtered_signal[index_bias + np.arange(y_length)]
 
+    ########
+    # second stage: zero-cross analysis on 4 points, to get the F0 candidates
+    ########
     # calculate 4 kinds of event
+    # Still a bit confused, but conceptually understandable
+    # Let's skip it for now
     neg_loc, neg_f0 = ZeroCrossingEngine(filtered_signal, fs)
     pos_loc, pos_f0 = ZeroCrossingEngine(-filtered_signal, fs)
     peak_loc, peak_f0 = ZeroCrossingEngine(np.diff(filtered_signal), fs)
     dip_loc, dip_f0 = ZeroCrossingEngine(-np.diff(filtered_signal), fs)
 
+    # Get F0 Candidates
+    # What is temporal position again? It is list of position of timeframe, in second.
+    # Assigning F0 candidates for each temporal_position.
     f0_candidates = GetF0Candidates(neg_loc, neg_f0, pos_loc, pos_f0,
                                     peak_loc, peak_f0, dip_loc, dip_f0, temporal_positions)
 
+    # Since this func is used to test F0 cand on a particular band (the band-pass filter, remember?),
+    # we need to make sure that the F0 cand are still in a logical range, relative to the boundary f0.
     f0_candidates[f0_candidates > boundary_f0 * 1.1] = 0
     f0_candidates[f0_candidates < boundary_f0 * 0.9] = 0
     f0_candidates[f0_candidates > f0_ceil] = 0
@@ -381,17 +482,41 @@ def CalculateRawEvent(boundary_f0: float, fs: int, y_spectrum: np.ndarray, y_len
 # negative zero crossing: going from positive to negative
 @numba.jit((numba.float64[:], numba.float64), nopython=True, cache=True)
 def ZeroCrossingEngine(x: np.ndarray, fs: int) -> tuple:
+    # Copying x, but shift it to t - 1
+    # It is done so we can truly get the zeroCrossing without thinking about the t=0
     y = np.empty_like(x)
     y[:-1] = x[1:]
     y[-1] = x[-1]
+    
+    # Finding points where zero-crossing happened. But, what with these weird operations?
+    # 1st line: creating list of index: num from 1 to len(x)+1
+    # 2nd line: checking if neighboring signal point has diff sign: x[t-1] * x[t] < 0
+    # 3rd line: checking if current trend is descending: x[t-1] < x[t]
+    # Combining 2nd and 3rd, we can find if current point is zero-crossing or not.
     negative_going_points = np.arange(1, len(x) + 1) * \
-                            ((y * x < 0) * (y < x))
+                            ((y * x < 0) * \
+                             (y < x))
 
+    # Throwing away the non-zero-crossing stuffs
     edge_list = negative_going_points[negative_going_points > 0]
 
+    # ...what?
+    # Got it. Operation is done to get the fractional precision on where does zero-crossing happen
     fine_edge_list = (edge_list) - x[edge_list - 1] / (x[edge_list] - x[edge_list - 1])
 
+    # It add the fine_edge_list by itself[t+1], then divide it by 2, and by sampling rate
+    # Oooh... rather than having the exact point where zero-crossing happen, we can have the separator of each zero-crossing.
+    # So, between 2 interval_location, there will only be 1 zero-crossing event.
+    # It can also mean the "center" of full wave.
+    # Dividing it by sampling_rate means the time is in second, rather than index.
     interval_locations = (fine_edge_list[:len(fine_edge_list) - 1] + fine_edge_list[1:]) / 2 / fs
+
+    # How about this? sampling rate divided by difference of fine_edge_list
+    # Fine_edge_list are also not in second, but in index
+    # Difference between 2 Zero-crossing moment means how long the interval between 2 ZC
+    # sampling_rate are in index/second
+    # Dividing sampling_rate with difference means getting the interval between 2 ZC, but in Hz
+    # Since interval between 2 ZC are 1 full period, the operation tries to get the F0 in the interval.
     interval_based_f0 = fs / np.diff(fine_edge_list)
     return interval_locations, interval_based_f0
 
@@ -600,13 +725,20 @@ def GetF0Candidates(neg_loc: np.ndarray, neg_f0: np.ndarray,
                     peak_loc: np.ndarray, peak_f0: np.ndarray,
                     dip_loc: np.ndarray, dip_f0: np.ndarray, temporal_positions: np.ndarray):
     # test this one
+    # np.size() get the number of element
+    # Because no axis provided, all singular element is counted.
+    # usable_channel? what is this?
+    # Check if all the ZC has at least 3 sector to be analyzed.
     usable_channel = max(0, np.size(neg_loc) - 2) * \
                      max(0, np.size(pos_loc) - 2) * \
                      max(0, np.size(peak_loc) - 2) * \
                      max(0, np.size(dip_f0) - 2)
 
+    # Preparing the F0 candidate for each timeframe, based on each ZC.
     interpolated_f0_list = np.zeros((4, np.size(temporal_positions)))
 
+    # Filling the F0 candidate based on ZC F0 list.
+    # Coz of different resolution or scale, interpolation is used.
     if usable_channel > 0:
         interpolated_f0_list[0, :] = interp1d(neg_loc,
                                               neg_f0,
@@ -659,6 +791,7 @@ def FilterF0(f0_contour: np.ndarray, st: int, ed: int, b: np.ndarray, a: np.ndar
 
 
 ####################################################################################################
+# Get the impulse response for nuttall window transformation
 def nuttall(N: int) -> np.ndarray:
     t = np.asmatrix(np.arange(N) * 2 * math.pi / (N-1))
     coefs = np.array([0.355768, -0.487396, 0.144232, -0.012604])
